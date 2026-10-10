@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+client-credentials.json
+credentials.json
+*.credentials.yaml
+.credentials/
+downloads/
+*.eml
+*-digest.json
+*.log
+coverage/

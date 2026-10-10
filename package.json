@@ -1,0 +1,21 @@
+{
+  "name": "gmail-draft-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Gmail MCP: search, read, export, attachments and draft-only email",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "auth": "node src/oauth.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "mailparser": "^3.7.0",
+    "nodemailer": "^10.1.0",
+    "zod": "^4.0.0"
+  }
+}

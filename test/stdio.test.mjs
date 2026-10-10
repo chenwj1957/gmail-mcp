@@ -13,7 +13,7 @@ test('real stdio server initializes and advertises exactly five draft-only tools
   const request = (method, params) => new Promise(resolve => { const id = next++; pending.set(id, resolve); child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); });
   try {
     const init = await request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test-client', version: '1' } });
-    assert.equal(init.result.serverInfo.name, 'gmail-draft-mcp');
+    assert.equal(init.result.serverInfo.name, 'gmail-mcp');
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
     const list = await request('tools/list', {}); assert.equal(list.result.tools.length, 5);
     assert.ok(list.result.tools.every(tool => !tool.name.includes('send')));

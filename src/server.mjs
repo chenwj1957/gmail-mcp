@@ -8,7 +8,7 @@ const cfg = config();
 try {
   const gmail = new Gmail(await credentials(cfg), cfg.downloadDir);
   await serveStdio(() => {
-    const server = new McpServer({ name: 'gmail-draft-mcp', version: '1.0.0' });
+    const server = new McpServer({ name: 'gmail-mcp', version: '1.0.0' });
     for (const tool of tools(gmail)) server.registerTool(tool.name, {
       description: tool.description, inputSchema: tool.schema,
       annotations: { readOnlyHint: tool.readOnly, destructiveHint: false, idempotentHint: tool.readOnly, openWorldHint: true },

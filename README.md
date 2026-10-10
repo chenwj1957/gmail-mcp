@@ -1,4 +1,4 @@
-# Gmail draft MCP
+# Gmail MCP
 
 A local stdio MCP server for Gmail. Requires Node.js 22 or newer.
 

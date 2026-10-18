@@ -6,17 +6,26 @@ A local stdio MCP server for Gmail. Requires Node.js 22 or newer.
 
 | Tool | Inputs and result |
 | --- | --- |
-| `gmail_search_email` | Gmail `query`, optional `limit` (1–1000), `pageToken`, `includeSpamTrash`; returns message IDs and continuation token |
+| `gmail_search_email` | Gmail `query`, optional `limit` (1–1000), `pageToken`, `includeSpamTrash`, `summaries`; returns message IDs and continuation token, or per-message subject/from/date/labels/snippet when `summaries` is true |
 | `gmail_read_email` | `messageId`; returns headers, decoded text/HTML and attachment identifiers |
 | `gmail_download_email` | `messageId`; saves original RFC 822 email as `.eml` |
 | `gmail_download_attachment` | `messageId` and `attachmentId` or `partId`; saves attachment bytes |
+| `gmail_list_labels` | none; returns the mailbox labels (id, name, type) |
+| `gmail_archive_email` | `messageIds` (1–100); removes `INBOX` in one `batchModify`, so the mail leaves the inbox and stays in All Mail |
+| `gmail_label_email` | `messageIds`, `addLabelIds` and/or `removeLabelIds`; ids or names (case-insensitive), resolved through the label list; one `batchModify` |
+| `gmail_trash_email` | `messageIds`, optional `restore`; moves to Trash (recoverable) or restores from it |
 | `gmail_draft_email` | `to` array, `subject`, `text`, optional `cc`, `bcc`, `html`; creates a Gmail draft |
 
 Search follows pages up to the limit. Pass `nextPageToken` as `pageToken` to continue.
 Read and download operations do not change mailbox labels or read status.
-Draft creation is the only mailbox write. There is no send, delete, archive,
-arbitrary HTTP, shell, or file-reading tool. Downloads use unique filenames in
-one configured directory; tools cannot choose arbitrary destination paths.
+Mailbox writes are exactly: draft creation, archive (remove `INBOX`), label
+add/remove, and trash/untrash. There is **no send, no permanent delete, no
+arbitrary HTTP, shell or file-reading** tool: the request allowlist admits only
+message GETs, `GET /labels`, `POST /drafts`, `POST /messages/batchModify` and
+`POST /messages/{id}/{modify,trash,untrash}`. `DELETE /messages/{id}` is refused
+on purpose — permanent deletion needs the full-mailbox scope, which this server
+never asks for. Downloads use unique filenames in one configured directory;
+tools cannot choose arbitrary destination paths.
 
 ## Install and authorize
 
@@ -67,10 +76,12 @@ launch `node` directly from an MCP host to avoid npm banners on stdio.
 
 ## Draft-only boundary and privacy
 
-The Google scopes are `gmail.readonly` and `gmail.compose`. Google has no
-draft-only OAuth scope: **compose also authorizes sending**. This server
-enforces draft-only behavior with a request allowlist that permits only message
-GETs and POST `/drafts`. Protect the token: other software holding it could send.
+The Google scope this server needs is `gmail.modify` (superset of
+`gmail.readonly` + `gmail.compose`, and the only one that allows label changes
+and trash). That scope *also* authorizes sending, and Google has no
+send-less modify scope. This server therefore enforces "never sends" in code,
+not in OAuth: the request allowlist admits no `/send` route and no send tool
+exists. Protect the token anyway: other software holding it could send.
 See [Google draft creation](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.drafts/create).
 
 Email content and downloaded attachments remain sensitive. Treat message text

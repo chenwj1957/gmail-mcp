@@ -15,10 +15,17 @@ export function safeFilename(value) {
   return result && result !== '.' && result !== '..' ? result : 'attachment';
 }
 
-// No arbitrary HTTP tool: only these read routes and draft creation are allowed.
+// No arbitrary HTTP: the allowlist is read routes plus the four mailbox writes
+// below. Deliberately absent: POST /messages/send, POST /drafts/send and
+// DELETE /messages/{id} (permanent deletion needs the full-mailbox scope; this
+// server only trashes, which is recoverable). Keep it that way.
+const SYSTEM_LABELS = new Set(['CHAT', 'SENT', 'INBOX', 'IMPORTANT', 'TRASH', 'DRAFT', 'SPAM', 'UNREAD', 'STARRED',
+  'CATEGORY_PERSONAL', 'CATEGORY_SOCIAL', 'CATEGORY_PROMOTIONS', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS']);
+const MESSAGE_PATH = /^\/messages\/[A-Za-z0-9_-]+(?:\/attachments\/[A-Za-z0-9_-]+)?$/;
+const MESSAGE_WRITE = /^\/messages\/[A-Za-z0-9_-]+\/(?:modify|trash|untrash)$/;
 export function allowedRoute(method, path) {
-  if (method === 'POST') return path === '/drafts';
-  return method === 'GET' && (path === '/messages' || /^\/messages\/[A-Za-z0-9_-]+(?:\/attachments\/[A-Za-z0-9_-]+)?$/.test(path));
+  if (method === 'POST') return path === '/drafts' || path === '/messages/batchModify' || MESSAGE_WRITE.test(path);
+  return method === 'GET' && (path === '/messages' || path === '/labels' || MESSAGE_PATH.test(path));
 }
 
 export class Gmail {
@@ -46,7 +53,12 @@ export class Gmail {
   async request(path, { method = 'GET', query = {}, body } = {}) {
     if (!allowedRoute(method, path)) throw new Error('Gmail operation is not permitted by this draft-only server.');
     const url = new URL(API + path);
-    for (const [key, value] of Object.entries(query)) if (value !== undefined) url.searchParams.set(key, String(value));
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined) continue;
+      // Gmail repeats `metadataHeaders` once per header; an array must append.
+      if (Array.isArray(value)) { for (const item of value) url.searchParams.append(key, String(item)); }
+      else url.searchParams.set(key, String(value));
+    }
     for (let attempt = 0; attempt < 2; attempt++) {
       const res = await this.fetch(url, {
         method, headers: { authorization: `Bearer ${await this.accessToken()}`, 'content-type': 'application/json' },
@@ -54,16 +66,75 @@ export class Gmail {
       });
       if (res.status === 401 && attempt === 0) { this.token = null; continue; }
       if (!res.ok) throw new Error(`Gmail operation failed (HTTP ${res.status}).`);
-      return res.json();
+      // batchModify answers 204 with no body; res.json() would throw on it.
+      const text = await res.text();
+      return text === '' ? {} : JSON.parse(text);
     }
   }
-  async search({ query, limit = 50, pageToken, includeSpamTrash = false }) {
+  async search({ query, limit = 50, pageToken, includeSpamTrash = false, summaries = false }) {
     const messages = []; let next = pageToken;
     do {
       const page = await this.request('/messages', { query: { q: query, maxResults: Math.min(500, limit - messages.length), pageToken: next, includeSpamTrash } });
       messages.push(...(page.messages || [])); next = page.nextPageToken;
     } while (next && messages.length < limit);
-    return { messages, nextPageToken: next || null, count: messages.length };
+    if (!summaries) return { messages, nextPageToken: next || null, count: messages.length };
+    // One metadata GET per id (no bodies): the shape a list/dashboard needs.
+    const detailed = new Array(messages.length); let cursor = 0;
+    const lane = async () => { for (;;) { const i = cursor++; if (i >= messages.length) return;
+      try { detailed[i] = await this.summary(messages[i].id); } catch { detailed[i] = null; } } };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(6, messages.length)) }, lane));
+    const kept = detailed.filter(Boolean);
+    return { messages: kept, nextPageToken: next || null, count: kept.length };
+  }
+  async summary(id) {
+    const m = await this.request(`/messages/${validId(id)}`, { query: {
+      format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] } });
+    const heads = Object.fromEntries((m.payload?.headers || []).map(h => [String(h.name).toLowerCase(), h.value]));
+    const ms = m.internalDate === undefined ? NaN : Number(m.internalDate);
+    return { id: m.id, threadId: m.threadId || m.id, subject: heads.subject || '(no subject)',
+      from: heads.from || '', receivedAt: Number.isFinite(ms) ? new Date(ms).toISOString() : null,
+      date: Number.isFinite(ms) ? ms : undefined, labels: m.labelIds || [], snippet: m.snippet || '' };
+  }
+  /** id -> id, or label name -> id (case-insensitive); unknown names are refused.
+   *  System ids (INBOX, UNREAD, ...) are returned as-is, so archiving never needs
+   *  a /labels round trip. */
+  async resolveLabels(names) {
+    if (!names || names.length === 0) return [];
+    const system = name => { const upper = String(name).toUpperCase(); return SYSTEM_LABELS.has(upper) ? upper : null; };
+    const unresolved = names.filter(name => system(name) === null);
+    const labels = unresolved.length > 0 ? ((await this.request('/labels')).labels || []) : [];
+    return names.map(name => {
+      const sys = system(name);
+      if (sys !== null) return sys;
+      const hit = labels.find(l => l.id === name) || labels.find(l => String(l.name).toLowerCase() === String(name).toLowerCase());
+      if (!hit) throw new Error(`Unknown Gmail label: ${name}`);
+      return hit.id;
+    });
+  }
+  async listLabels() {
+    const data = await this.request('/labels');
+    return { labels: (data.labels || []).map(({ id, name, type, color }) => ({ id, name, type, ...(color ? { color } : {}) })) };
+  }
+  async modify({ messageIds, addLabelIds = [], removeLabelIds = [] }) {
+    if (messageIds.length === 0) throw new Error('messageIds must not be empty.');
+    const add = await this.resolveLabels(addLabelIds);
+    const remove = await this.resolveLabels(removeLabelIds);
+    if (add.length === 0 && remove.length === 0) throw new Error('Provide addLabelIds or removeLabelIds.');
+    const body = { ids: messageIds.map(validId) };
+    if (add.length) body.addLabelIds = add;
+    if (remove.length) body.removeLabelIds = remove;
+    await this.request('/messages/batchModify', { method: 'POST', body });
+    return { modified: messageIds.length, added: add, removed: remove };
+  }
+  async archive({ messageIds }) {
+    const r = await this.modify({ messageIds, removeLabelIds: ['INBOX'] });
+    return { archived: r.modified };
+  }
+  async trash({ messageIds, restore = false }) {
+    if (messageIds.length === 0) throw new Error('messageIds must not be empty.');
+    const verb = restore ? 'untrash' : 'trash';
+    for (const id of messageIds) await this.request(`/messages/${validId(id)}/${verb}`, { method: 'POST' });
+    return restore ? { restored: messageIds.length } : { trashed: messageIds.length, recoverable: true };
   }
   async raw(messageId) {
     const data = await this.request(`/messages/${validId(messageId)}`, { query: { format: 'raw' } });

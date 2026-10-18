@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { simpleParser } from 'mailparser';
@@ -18,14 +18,20 @@ function mock(handler) {
   });
   return { gmail, calls };
 }
-test('only five generic tools; no send endpoint, aliases or arbitrary methods', async () => {
-  assert.equal(tools({}).length, 5);
+test('no send endpoint, no permanent delete, no arbitrary methods', async () => {
+  assert.equal(tools({}).length, 9);
   assert.ok(tools({}).every(t => !t.name.includes('send')));
-  for (const [method, path] of [['POST', '/messages/send'], ['POST', '/drafts/send'], ['DELETE', '/messages/a'], ['POST', '/messages/a/modify'], ['GET', '/messages/../drafts']]) assert.equal(allowedRoute(method, path), false);
+  for (const [method, path] of [['POST', '/messages/send'], ['POST', '/drafts/send'], ['DELETE', '/messages/a'],
+    ['DELETE', '/messages/a/trash'], ['POST', '/threads/a/modify'], ['GET', '/messages/../drafts']]) assert.equal(allowedRoute(method, path), false);
   const { gmail, calls } = mock(() => assert.fail());
   await assert.rejects(gmail.request('/messages/send', { method: 'POST' }), /not permitted/);
   assert.equal(calls.length, 0);
   assert.throws(() => validId('../drafts'), /Invalid/);
+});
+test('the write allowlist is exactly archive/label/trash/untrash plus drafts', () => {
+  for (const path of ['/messages/a/modify', '/messages/batchModify', '/messages/a/trash', '/messages/a/untrash', '/drafts']) assert.equal(allowedRoute('POST', path), true, path);
+  for (const path of ['/messages', '/messages/a', '/messages/a/attachments/b', '/labels']) assert.equal(allowedRoute('GET', path), true, path);
+  for (const path of ['/messages/send', '/drafts/send', '/messages/a/attachments/b/delete']) assert.equal(allowedRoute('POST', path), false, path);
 });
 test('search paginates and returns continuation at the requested limit', async () => {
   const { gmail, calls } = mock(url => Response.json(url.searchParams.has('pageToken') ? { messages: [{ id: 'b' }], nextPageToken: 'remaining' } : { messages: [{ id: 'a' }], nextPageToken: 'second' }));
@@ -50,7 +56,7 @@ test('downloads preserve EML bytes and avoid collisions and traversal', async ()
     const { gmail } = mock(() => Response.json({ raw: raw.toString('base64url') })); gmail.downloadDir = root;
     const exported = await gmail.downloadEmail({ messageId: 'm1' }); assert.deepEqual(await readFile(exported.path), raw);
     const one = await gmail.save('../../same.pdf', Buffer.from('one')); const two = await gmail.save('../../same.pdf', Buffer.from('two'));
-    assert.equal(dirname(one.path).toLowerCase(), root.toLowerCase()); assert.notEqual(one.path, two.path); assert.equal(await readFile(one.path, 'utf8'), 'one');
+    assert.equal(dirname(one.path).toLowerCase(), (await realpath(root)).toLowerCase()); assert.notEqual(one.path, two.path); assert.equal(await readFile(one.path, 'utf8'), 'one');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 test('read decodes MIME and exposes attachment identifiers', async () => {
@@ -71,7 +77,55 @@ test('OAuth rejects stale state even on an error callback', () => {
   assert.equal(validCallback(new URL('http://127.0.0.1/?state=expected&code=example'), 'expected'), true);
 });
 test('schema rejects header injection and invalid attachment arguments', () => {
-  const definitions = tools({});
-  assert.equal(definitions[4].schema.safeParse({ to: ['x@example.com'], subject: 'a\r\nBcc: b', text: '' }).success, false);
-  assert.equal(definitions[3].schema.safeParse({ messageId: 'm1' }).success, false);
+  const byName = Object.fromEntries(tools({}).map(t => [t.name, t]));
+  assert.equal(byName.gmail_draft_email.schema.safeParse({ to: ['x@example.com'], subject: 'a\r\nBcc: b', text: '' }).success, false);
+  assert.equal(byName.gmail_download_attachment.schema.safeParse({ messageId: 'm1' }).success, false);
+  assert.equal(byName.gmail_label_email.schema.safeParse({ messageIds: ['m1'] }).success, false);
+  assert.equal(byName.gmail_archive_email.schema.safeParse({ messageIds: [] }).success, false);
+});
+
+test('archive removes INBOX in one batchModify call', async () => {
+  const { gmail, calls } = mock(() => Response.json({}));
+  assert.deepEqual(await gmail.archive({ messageIds: ['m1', 'm2'] }), { archived: 2 });
+  const write = calls.find(c => c.options.method === 'POST' && c.url.includes('/gmail/v1/'));
+  assert.equal(new URL(write.url).pathname, '/gmail/v1/users/me/messages/batchModify');
+  assert.deepEqual(JSON.parse(write.options.body), { ids: ['m1', 'm2'], removeLabelIds: ['INBOX'] });
+});
+
+test('labels resolve by name or id and unknown names are refused', async () => {
+  const { gmail } = mock(url => url.pathname.endsWith('/labels')
+    ? Response.json({ labels: [{ id: 'INBOX', name: 'INBOX', type: 'system' }, { id: 'Label_7', name: 'Tax', type: 'user' }] })
+    : Response.json({}));
+  assert.deepEqual(await gmail.listLabels(), { labels: [{ id: 'INBOX', name: 'INBOX', type: 'system' }, { id: 'Label_7', name: 'Tax', type: 'user' }] });
+  const r = await gmail.modify({ messageIds: ['m1'], addLabelIds: ['Tax'], removeLabelIds: ['INBOX'] });
+  assert.deepEqual(r, { modified: 1, added: ['Label_7'], removed: ['INBOX'] });
+  await assert.rejects(gmail.modify({ messageIds: ['m1'], addLabelIds: ['Nope'] }), /Unknown Gmail label/);
+});
+
+test('batchModify answers 204 with no body and is not treated as a parse error', async () => {
+  const { gmail } = mock(() => new Response(null, { status: 204 }));
+  assert.deepEqual(await gmail.modify({ messageIds: ['m1'], removeLabelIds: ['INBOX'] }), { modified: 1, added: [], removed: ['INBOX'] });
+});
+test('trash and untrash hit the per-message endpoints, never DELETE', async () => {
+  const { gmail, calls } = mock(() => Response.json({}));
+  assert.deepEqual(await gmail.trash({ messageIds: ['m1'] }), { trashed: 1, recoverable: true });
+  assert.deepEqual(await gmail.trash({ messageIds: ['m1'], restore: true }), { restored: 1 });
+  assert.deepEqual(calls.slice(-2).map(c => new URL(c.url).pathname), ['/gmail/v1/users/me/messages/m1/trash', '/gmail/v1/users/me/messages/m1/untrash']);
+  assert.ok(calls.every(c => c.options.method !== 'DELETE'));
+});
+
+test('search summaries carry subject/from/date/labels without fetching bodies', async () => {
+  const { gmail, calls } = mock(url => url.searchParams.get('format') === 'metadata'
+    ? Response.json({ id: 'm1', threadId: 'm1', internalDate: '1700000000000', labelIds: ['INBOX'],
+      payload: { headers: [{ name: 'Subject', value: 'Hello' }, { name: 'From', value: 'A <a@b.c>' }] }, snippet: 'hi' })
+    : Response.json({ messages: [{ id: 'm1' }] }));
+  const r = await gmail.search({ query: 'q', limit: 5, summaries: true });
+  assert.equal(r.messages[0].subject, 'Hello');
+  assert.equal(r.messages[0].from, 'A <a@b.c>');
+  assert.deepEqual(r.messages[0].labels, ['INBOX']);
+  assert.equal(new Date(r.messages[0].receivedAt).toISOString(), '2023-11-14T22:13:20.000Z');
+  assert.ok(calls.some(c => new URL(c.url).searchParams.get('format') === 'metadata'));
+  assert.ok(!calls.some(c => new URL(c.url).searchParams.get('format') === 'full'));
+  const headers = new URL(calls.find(c => new URL(c.url).searchParams.get('format') === 'metadata').url).searchParams.getAll('metadataHeaders');
+  assert.deepEqual(headers, ['From', 'Subject', 'Date']);
 });

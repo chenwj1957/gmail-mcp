@@ -19,7 +19,7 @@ function mock(handler) {
   return { gmail, calls };
 }
 test('no send endpoint, no permanent delete, no arbitrary methods', async () => {
-  assert.equal(tools({}).length, 9);
+  assert.equal(tools({}).length, 20);
   assert.ok(tools({}).every(t => !t.name.includes('send')));
   for (const [method, path] of [['POST', '/messages/send'], ['POST', '/drafts/send'], ['DELETE', '/messages/a'],
     ['DELETE', '/messages/a/trash'], ['POST', '/threads/a/modify'], ['GET', '/messages/../drafts']]) assert.equal(allowedRoute(method, path), false);
@@ -28,10 +28,14 @@ test('no send endpoint, no permanent delete, no arbitrary methods', async () => 
   assert.equal(calls.length, 0);
   assert.throws(() => validId('../drafts'), /Invalid/);
 });
-test('the write allowlist is exactly archive/label/trash/untrash plus drafts', () => {
-  for (const path of ['/messages/a/modify', '/messages/batchModify', '/messages/a/trash', '/messages/a/untrash', '/drafts']) assert.equal(allowedRoute('POST', path), true, path);
-  for (const path of ['/messages', '/messages/a', '/messages/a/attachments/b', '/labels']) assert.equal(allowedRoute('GET', path), true, path);
+test('the write allowlist is exactly archive/label/trash/untrash, filters and drafts', () => {
+  for (const path of ['/messages/a/modify', '/messages/batchModify', '/messages/a/trash', '/messages/a/untrash', '/drafts', '/settings/filters', '/labels']) assert.equal(allowedRoute('POST', path), true, path);
+  for (const path of ['/messages', '/messages/a', '/messages/a/attachments/b', '/labels', '/settings/filters']) assert.equal(allowedRoute('GET', path), true, path);
+  assert.equal(allowedRoute('DELETE', '/settings/filters/f1'), true);
   for (const path of ['/messages/send', '/drafts/send', '/messages/a/attachments/b/delete']) assert.equal(allowedRoute('POST', path), false, path);
+  // Message deletion stays refused: only filters may be deleted.
+  for (const path of ['/messages/a', '/threads/t1']) assert.equal(allowedRoute('DELETE', path), false, path);
+  assert.equal(allowedRoute('DELETE', '/settings/filters'), false);
 });
 test('search paginates and returns continuation at the requested limit', async () => {
   const { gmail, calls } = mock(url => Response.json(url.searchParams.has('pageToken') ? { messages: [{ id: 'b' }], nextPageToken: 'remaining' } : { messages: [{ id: 'a' }], nextPageToken: 'second' }));
@@ -105,6 +109,36 @@ test('labels resolve by name or id and unknown names are refused', async () => {
 test('batchModify answers 204 with no body and is not treated as a parse error', async () => {
   const { gmail } = mock(() => new Response(null, { status: 204 }));
   assert.deepEqual(await gmail.modify({ messageIds: ['m1'], removeLabelIds: ['INBOX'] }), { modified: 1, added: [], removed: ['INBOX'] });
+});
+test('createLabel posts the name and refuses junk names', async () => {
+  const { gmail, calls } = mock((url, options) => Response.json({ id: 'Label_42', name: JSON.parse(options.body).name, type: 'user' }));
+  assert.deepEqual(await gmail.createLabel({ name: 'Property' }), { id: 'Label_42', name: 'Property', type: 'user' });
+  const post = calls.find((c) => c.options.method === 'POST' && c.url.includes('/labels'));
+  assert.deepEqual(JSON.parse(post.options.body), { name: 'Property', labelListVisibility: 'labelShow', messageListVisibility: 'show' });
+  await assert.rejects(gmail.createLabel({ name: '  ' }), /1-225 characters/);
+  await assert.rejects(gmail.createLabel({ name: 'a\nb' }), /control characters/);
+});
+test('filters list, create (label names resolved) and delete', async () => {
+  const { gmail, calls } = mock((url, options) => {
+    if (url.pathname.endsWith('/labels')) return Response.json({ labels: [{ id: 'Label_7', name: 'Property/Alerts', type: 'user' }, { id: 'INBOX', name: 'INBOX', type: 'system' }] });
+    if (url.pathname.endsWith('/settings/filters') && options.method === 'POST') return Response.json({ id: 'f1', criteria: JSON.parse(options.body).criteria, action: JSON.parse(options.body).action });
+    if (url.pathname.endsWith('/settings/filters')) return Response.json({ filter: [{ id: 'f0', criteria: { from: 'a@b.c' }, action: { addLabelIds: ['Label_7'] } }] });
+    return Response.json({});
+  });
+  assert.deepEqual(await gmail.listFilters(), { filters: [{ id: 'f0', criteria: { from: 'a@b.c' }, action: { addLabelIds: ['Label_7'] } }] });
+  const created = await gmail.createFilter({ criteria: { from: 'realtor.com' }, action: { addLabelIds: ['Property/Alerts'], removeLabelIds: ['INBOX'] } });
+  assert.equal(created.id, 'f1');
+  const post = calls.find((c) => c.options.method === 'POST' && c.url.includes('/settings/filters'));
+  assert.deepEqual(JSON.parse(post.options.body), { criteria: { from: 'realtor.com' }, action: { addLabelIds: ['Label_7'], removeLabelIds: ['INBOX'] } });
+  assert.deepEqual(await gmail.deleteFilter({ filterId: 'f9' }), { deleted: 'f9' });
+  const del = calls.find((c) => c.options.method === 'DELETE');
+  assert.equal(new URL(del.url).pathname, '/gmail/v1/users/me/settings/filters/f9');
+  await assert.rejects(gmail.createFilter({ criteria: {}, action: { addLabelIds: ['INBOX'] } }), /at least one filter criterion/);
+  await assert.rejects(gmail.createFilter({ criteria: { from: 'x' }, action: {} }), /addLabelIds or removeLabelIds/);
+});
+test('a Google failure surfaces its own reason (quota vs bug)', async () => {
+  const { gmail } = mock(() => ({ ok: false, status: 403, text: async () => JSON.stringify({ error: { code: 403, message: 'User-rate limit exceeded.' } }) }));
+  await assert.rejects(gmail.search({ query: 'in:inbox', limit: 1 }), /HTTP 403\): User-rate limit exceeded\./);
 });
 test('trash and untrash hit the per-message endpoints, never DELETE', async () => {
   const { gmail, calls } = mock(() => Response.json({}));

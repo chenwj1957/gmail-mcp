@@ -23,9 +23,13 @@ const SYSTEM_LABELS = new Set(['CHAT', 'SENT', 'INBOX', 'IMPORTANT', 'TRASH', 'D
   'CATEGORY_PERSONAL', 'CATEGORY_SOCIAL', 'CATEGORY_PROMOTIONS', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS']);
 const MESSAGE_PATH = /^\/messages\/[A-Za-z0-9_-]+(?:\/attachments\/[A-Za-z0-9_-]+)?$/;
 const MESSAGE_WRITE = /^\/messages\/[A-Za-z0-9_-]+\/(?:modify|trash|untrash)$/;
+const FILTER_PATH = /^\/settings\/filters\/[A-Za-z0-9_-]+$/;
 export function allowedRoute(method, path) {
-  if (method === 'POST') return path === '/drafts' || path === '/messages/batchModify' || MESSAGE_WRITE.test(path);
-  return method === 'GET' && (path === '/messages' || path === '/labels' || MESSAGE_PATH.test(path));
+  if (method === 'POST') return path === '/drafts' || path === '/labels' || path === '/messages/batchModify' || path === '/settings/filters' || MESSAGE_WRITE.test(path);
+  // The only DELETE this server performs is removing a filter rule it could
+  // create; message deletion stays refused (see above).
+  if (method === 'DELETE') return FILTER_PATH.test(path);
+  return method === 'GET' && (path === '/messages' || path === '/labels' || path === '/settings/filters' || MESSAGE_PATH.test(path));
 }
 
 export class Gmail {
@@ -65,9 +69,16 @@ export class Gmail {
         body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000),
       });
       if (res.status === 401 && attempt === 0) { this.token = null; continue; }
-      if (!res.ok) throw new Error(`Gmail operation failed (HTTP ${res.status}).`);
       // batchModify answers 204 with no body; res.json() would throw on it.
       const text = await res.text();
+      if (!res.ok) {
+        // Surface Google's own reason ("User-rate limit exceeded", "Invalid label")
+        // but nothing else: it is the only way a caller can tell a quota problem
+        // from a bug.
+        let reason = '';
+        try { reason = JSON.parse(text)?.error?.message || ''; } catch { /* non-JSON body */ }
+        throw new Error(`Gmail operation failed (HTTP ${res.status})` + (reason ? `: ${String(reason).slice(0, 200)}` : '.'));
+      }
       return text === '' ? {} : JSON.parse(text);
     }
   }
@@ -114,6 +125,38 @@ export class Gmail {
   async listLabels() {
     const data = await this.request('/labels');
     return { labels: (data.labels || []).map(({ id, name, type, color }) => ({ id, name, type, ...(color ? { color } : {}) })) };
+  }
+  /** Create a user label. Gmail refuses a duplicate name, which is the useful
+   *  signal here: the caller should reuse the existing id instead. */
+  async createLabel({ name, labelListVisibility = 'labelShow', messageListVisibility = 'show' }) {
+    const clean = String(name ?? '').trim();
+    if (clean === '' || clean.length > 225) throw new Error('Label name must be 1-225 characters.');
+    if (/[\r\n\x00]/.test(clean)) throw new Error('Label name must not contain control characters.');
+    const label = await this.request('/labels', { method: 'POST', body: { name: clean, labelListVisibility, messageListVisibility } });
+    return { id: label.id, name: label.name, type: label.type };
+  }
+
+  /** The account's server-side filters (Gmail Settings -> Filters). Creating or
+   *  deleting one needs the gmail.settings.basic scope; reading needs it too. */
+  async listFilters() {
+    const data = await this.request('/settings/filters');
+    return { filters: (data.filter || []).map(({ id, criteria, action }) => ({ id, criteria, action })) };
+  }
+  async createFilter({ criteria, action }) {
+    const CRITERIA = ['from', 'to', 'subject', 'query', 'negatedQuery', 'hasAttachment', 'excludeChats', 'size', 'sizeComparison'];
+    const kept = {};
+    for (const key of CRITERIA) if (criteria?.[key] !== undefined && criteria[key] !== '') kept[key] = criteria[key];
+    if (Object.keys(kept).length === 0) throw new Error('Provide at least one filter criterion.');
+    const add = await this.resolveLabels(action?.addLabelIds || []);
+    const remove = await this.resolveLabels(action?.removeLabelIds || []);
+    if (add.length === 0 && remove.length === 0) throw new Error('Provide addLabelIds or removeLabelIds for the filter action.');
+    const body = { criteria: kept, action: { addLabelIds: add, removeLabelIds: remove } };
+    const filter = await this.request('/settings/filters', { method: 'POST', body });
+    return { id: filter.id, criteria: filter.criteria, action: filter.action };
+  }
+  async deleteFilter({ filterId }) {
+    await this.request('/settings/filters/' + validId(filterId), { method: 'DELETE' });
+    return { deleted: filterId };
   }
   async modify({ messageIds, addLabelIds = [], removeLabelIds = [] }) {
     if (messageIds.length === 0) throw new Error('messageIds must not be empty.');

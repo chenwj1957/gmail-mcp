@@ -8,6 +8,7 @@ export function config(env = process.env) {
     clientFile: resolve(env.GMAIL_CLIENT_FILE || join(home, 'client-credentials.json')),
     tokenFile: resolve(env.GMAIL_TOKEN_FILE || join(home, 'credentials.json')),
     downloadDir: resolve(env.GMAIL_DOWNLOAD_DIR || join(home, 'downloads')),
+    pendingFile: resolve(env.GMAIL_PENDING_FILE || join(home, 'pending-auth.json')),
   };
 }
 

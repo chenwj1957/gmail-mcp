@@ -11,7 +11,7 @@ try {
   const gmail = new Gmail(creds, cfg.downloadDir);
   const calendar = new Calendar(creds, { timeZone: process.env.CALENDAR_TIME_ZONE || DEFAULT_TIME_ZONE });
   await serveStdio(() => {
-    const server = new McpServer({ name: 'gmail-mcp', version: '1.1.0' });
+    const server = new McpServer({ name: 'gmail-mcp', version: '1.2.0' });
     for (const tool of tools(gmail, calendar)) server.registerTool(tool.name, {
       description: tool.description, inputSchema: tool.schema,
       annotations: { readOnlyHint: tool.readOnly, destructiveHint: Boolean(tool.destructive), idempotentHint: tool.readOnly, openWorldHint: true },

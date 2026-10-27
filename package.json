@@ -1,6 +1,6 @@
 {
   "name": "gmail-mcp",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "Local Gmail + Google Calendar MCP: search, read, export, attachments, draft-only email and event create/update/delete without guest notifications",

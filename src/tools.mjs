@@ -8,6 +8,13 @@ const calendarId = z.string().min(1).max(256).regex(/^[A-Za-z0-9._@+-]+$/).defau
 const eventId = z.string().regex(/^[A-Za-z0-9_-]+$/).max(1024);
 const calendarTime = z.string().regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})?)?$/).max(64);
 const reminder = z.object({ method: z.enum(['popup', 'email']).default('popup'), minutes: z.number().int().min(0).max(40320) });
+const attachment = z.object({
+  filename: z.string().min(1).max(255).regex(/^[^\x00-\x1f\x7f/\\]+$/),
+  path: z.string().min(1).max(4096).optional(),
+  contentBase64: z.string().min(1).optional(),
+  contentType: z.string().min(1).max(255).regex(/^[\x20-\x7e]+$/).optional(),
+  cid: z.string().min(1).max(255).regex(/^[^\x00-\x1f\x7f\s]+$/).optional(),
+}).refine(x => (x.path === undefined) !== (x.contentBase64 === undefined), 'Provide exactly one of path or contentBase64 per attachment');
 export function tools(gmail, calendar) {
   return [
     { name: 'gmail_search_email', description: 'Search Gmail using Gmail query syntax. Follows pages up to limit; use nextPageToken to continue. Set summaries=true to also return subject/from/date/labels/snippet per message (one metadata request each) instead of bare ids.',
@@ -17,7 +24,7 @@ export function tools(gmail, calendar) {
       schema: z.object({ messageId: id }), run: args => gmail.read(args), readOnly: true },
     { name: 'gmail_download_email', description: 'Save the complete original email as an EML file in the configured download directory.',
       schema: z.object({ messageId: id }), run: args => gmail.downloadEmail(args), readOnly: false },
-    { name: 'gmail_download_attachment', description: 'Save an attachment to the configured directory. Use attachmentId, or partId for inline content.',
+    { name: 'gmail_download_attachment', description: 'Save an attachment to the configured directory. Use attachmentId, or partId for inline content or for draft messages (Gmail regenerates draft attachment IDs on every read, so partId is the stable handle).',
       schema: z.object({ messageId: id, attachmentId: id.optional(), partId: z.string().regex(/^[0-9.]*$/).max(100).optional() }).refine(x => x.attachmentId !== undefined || x.partId !== undefined, 'Provide attachmentId or partId'),
       run: args => gmail.downloadAttachment(args), readOnly: false },
     { name: 'gmail_list_labels', description: 'List the mailbox labels (id, name, type). Use it to find the label name that gmail_label_email expects; system labels such as INBOX/UNREAD/STARRED need no lookup.',
@@ -57,8 +64,17 @@ export function tools(gmail, calendar) {
       }), run: args => gmail.createFilter(args), readOnly: false },
     { name: 'gmail_delete_filter', description: 'Delete a Gmail filter rule by its id (see gmail_list_filters). Deleting a rule never touches mail it already labelled.',
       schema: z.object({ filterId: id }), run: args => gmail.deleteFilter(args), readOnly: false },
-    { name: 'gmail_draft_email', description: 'Create a new Gmail draft with plain text and optional HTML. Never sends email.',
-      schema: z.object({ to: z.array(email).min(1).max(100), cc: z.array(email).max(100).optional(), bcc: z.array(email).max(100).optional(), subject: z.string().max(998).regex(/^[^\r\n\x00]*$/), text: z.string().max(1000000), html: z.string().max(1000000).optional() }),
+    { name: 'gmail_draft_email', description: 'Create a new Gmail draft with plain text and optional HTML. Never sends email. Attach local files with attachments:[{filename, path}] or inline bytes with contentBase64 (optional contentType/cid), up to 15 MB decoded in total. Set threadId to put the draft in an existing thread: the server reads that thread\'s latest Message-ID and sets In-Reply-To/References; an empty subject inherits "Re: <thread subject>". Relative paths resolve against the server working directory, so prefer absolute paths.',
+      schema: z.object({
+        to: z.array(email).min(1).max(100),
+        cc: z.array(email).max(100).optional(),
+        bcc: z.array(email).max(100).optional(),
+        subject: z.string().max(998).regex(/^[^\r\n\x00]*$/),
+        text: z.string().max(1000000),
+        html: z.string().max(1000000).optional(),
+        threadId: id.optional(),
+        attachments: z.array(attachment).max(10).optional(),
+      }),
       run: args => gmail.draft(args), readOnly: false },
     { name: 'calendar_list_calendars', description: 'List the Google calendars visible to this account (id, summary, primary, accessRole, timeZone). Use the id in the other calendar tools; "primary" is the default.',
       schema: z.object({}), run: () => calendar.listCalendars(), readOnly: true },

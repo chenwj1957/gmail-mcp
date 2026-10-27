@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { simpleParser } from 'mailparser';
@@ -22,7 +22,7 @@ test('no send endpoint, no permanent delete, no arbitrary methods', async () => 
   assert.equal(tools({}).length, 20);
   assert.ok(tools({}).every(t => !t.name.includes('send')));
   for (const [method, path] of [['POST', '/messages/send'], ['POST', '/drafts/send'], ['DELETE', '/messages/a'],
-    ['DELETE', '/messages/a/trash'], ['POST', '/threads/a/modify'], ['GET', '/messages/../drafts']]) assert.equal(allowedRoute(method, path), false);
+    ['DELETE', '/messages/a/trash'], ['POST', '/threads/a/modify'], ['POST', '/threads/a'], ['GET', '/messages/../drafts']]) assert.equal(allowedRoute(method, path), false);
   const { gmail, calls } = mock(() => assert.fail());
   await assert.rejects(gmail.request('/messages/send', { method: 'POST' }), /not permitted/);
   assert.equal(calls.length, 0);
@@ -30,7 +30,7 @@ test('no send endpoint, no permanent delete, no arbitrary methods', async () => 
 });
 test('the write allowlist is exactly archive/label/trash/untrash, filters and drafts', () => {
   for (const path of ['/messages/a/modify', '/messages/batchModify', '/messages/a/trash', '/messages/a/untrash', '/drafts', '/settings/filters', '/labels']) assert.equal(allowedRoute('POST', path), true, path);
-  for (const path of ['/messages', '/messages/a', '/messages/a/attachments/b', '/labels', '/settings/filters']) assert.equal(allowedRoute('GET', path), true, path);
+  for (const path of ['/messages', '/messages/a', '/messages/a/attachments/b', '/labels', '/settings/filters', '/threads/t1']) assert.equal(allowedRoute('GET', path), true, path);
   assert.equal(allowedRoute('DELETE', '/settings/filters/f1'), true);
   for (const path of ['/messages/send', '/drafts/send', '/messages/a/attachments/b/delete']) assert.equal(allowedRoute('POST', path), false, path);
   // Message deletion stays refused: only filters may be deleted.
@@ -52,6 +52,63 @@ test('draft creates MIME with Unicode and BCC, posts only drafts', async () => {
   assert.equal(parsed.subject, 'Hello 世界'); assert.match(parsed.text, /café/); assert.equal(parsed.bcc.value[0].address, 'hidden@example.com');
   assert.equal(result.sent, false); assert.equal(calls.length, 2);
   await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 'bad\r\nBcc: x@example.com', text: '' }), /control/);
+});
+test('draft attaches local files and inline base64 content', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gmail-mcp-attach-'));
+  try {
+    const path = join(root, 'report.txt'); await writeFile(path, 'file bytes');
+    let payload;
+    const { gmail } = mock((url, options) => { assert.equal(url.pathname.endsWith('/drafts'), true); assert.equal(options.method, 'POST'); payload = JSON.parse(options.body); return Response.json({ id: 'd1', message: { id: 'm1', threadId: 'new-thread' } }); });
+    const result = await gmail.draft({ to: ['r@example.com'], subject: 'Files', text: 'body', attachments: [
+      { filename: 'report.txt', path },
+      { filename: 'data.bin', contentBase64: Buffer.from('base64 bytes').toString('base64'), contentType: 'application/octet-stream' }] });
+    const parsed = await simpleParser(Buffer.from(payload.message.raw, 'base64url'));
+    assert.deepEqual(parsed.attachments.map(a => a.filename).sort(), ['data.bin', 'report.txt']);
+    assert.equal(parsed.attachments.find(a => a.filename === 'report.txt').content.toString(), 'file bytes');
+    assert.equal(parsed.attachments.find(a => a.filename === 'data.bin').content.toString(), 'base64 bytes');
+    assert.equal(payload.message.threadId, undefined);
+    assert.equal(result.threadId, 'new-thread');
+    assert.deepEqual(result.attachments.map(a => a.bytes), [10, 12]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+test('draft with threadId derives In-Reply-To, References and subject', async () => {
+  let payload;
+  const { gmail, calls } = mock((url, options) => {
+    if (url.pathname.endsWith('/threads/t1')) {
+      assert.equal(url.searchParams.get('format'), 'metadata');
+      assert.deepEqual(url.searchParams.getAll('metadataHeaders'), ['Message-ID', 'References', 'Subject']);
+      return Response.json({ messages: [
+        { id: 'm0', internalDate: '1000', payload: { headers: [{ name: 'Message-ID', value: '<root@example.com>' }, { name: 'Subject', value: 'Quote' }] } },
+        { id: 'm1', internalDate: '2000', payload: { headers: [{ name: 'Message-ID', value: '<reply@example.com>' }, { name: 'References', value: '<root@example.com>' }, { name: 'Subject', value: 'Re: Quote' }] } },
+      ] });
+    }
+    payload = JSON.parse(options.body);
+    return Response.json({ id: 'd1', message: { id: 'm2', threadId: 't1' } });
+  });
+  const result = await gmail.draft({ to: ['r@example.com'], subject: '', text: 'reply body', threadId: 't1' });
+  assert.equal(payload.message.threadId, 't1');
+  const parsed = await simpleParser(Buffer.from(payload.message.raw, 'base64url'));
+  assert.equal(parsed.subject, 'Re: Quote');
+  assert.equal(parsed.inReplyTo, '<reply@example.com>');
+  assert.equal(String((Array.isArray(parsed.references) ? parsed.references.join(' ') : parsed.references)).replace(/,\s*/g, ' '), '<root@example.com> <reply@example.com>');
+  assert.deepEqual(result.reply, { threadId: 't1', inReplyTo: '<reply@example.com>' });
+  assert.equal(result.threadId, 't1');
+  assert.equal(calls.length, 3); // token refresh, thread read, draft POST
+});
+test('draft refuses bad attachments and oversized files before any Gmail call', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gmail-mcp-attach-'));
+  try {
+    const big = join(root, 'big.bin'); await writeFile(big, Buffer.alloc(6));
+    const { gmail, calls } = mock(() => assert.fail('no Gmail request expected'));
+    gmail.maxAttachmentBytes = 5;
+    await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'a.txt', path: join(root, 'missing.txt') }] }), /Attachment file not found/);
+    await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'a.txt', path: root }] }), /not a regular file/);
+    await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'big.bin', path: big }] }), /exceeds the 0 MB limit/);
+    await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'a.txt', contentBase64: 'not base64!' }] }), /Invalid attachment contentBase64/);
+    await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'a/b.txt', contentBase64: 'eA==' }] }), /Invalid attachment filename/);
+    await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 's', text: '', threadId: '../drafts' }), /Invalid Gmail identifier/);
+    assert.equal(calls.length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 test('downloads preserve EML bytes and avoid collisions and traversal', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gmail-mcp-test-'));
@@ -82,7 +139,14 @@ test('OAuth rejects stale state even on an error callback', () => {
 });
 test('schema rejects header injection and invalid attachment arguments', () => {
   const byName = Object.fromEntries(tools({}).map(t => [t.name, t]));
-  assert.equal(byName.gmail_draft_email.schema.safeParse({ to: ['x@example.com'], subject: 'a\r\nBcc: b', text: '' }).success, false);
+  const draft = byName.gmail_draft_email.schema;
+  assert.equal(draft.safeParse({ to: ['x@example.com'], subject: 'a\r\nBcc: b', text: '' }).success, false);
+  assert.equal(draft.safeParse({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'a.pdf', path: '/tmp/a.pdf' }] }).success, true);
+  assert.equal(draft.safeParse({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'a.pdf', contentBase64: 'eA==' }], threadId: 't1' }).success, true);
+  assert.equal(draft.safeParse({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'a.pdf' }] }).success, false);
+  assert.equal(draft.safeParse({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'a.pdf', path: '/tmp/a.pdf', contentBase64: 'eA==' }] }).success, false);
+  assert.equal(draft.safeParse({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: '../a.pdf', path: '/tmp/a.pdf' }] }).success, false);
+  assert.equal(draft.safeParse({ to: ['x@example.com'], subject: 's', text: '', threadId: '../x' }).success, false);
   assert.equal(byName.gmail_download_attachment.schema.safeParse({ messageId: 'm1' }).success, false);
   assert.equal(byName.gmail_label_email.schema.safeParse({ messageIds: ['m1'] }).success, false);
   assert.equal(byName.gmail_archive_email.schema.safeParse({ messageIds: [] }).success, false);

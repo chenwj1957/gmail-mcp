@@ -18,18 +18,49 @@ A local stdio MCP server for Gmail. Requires Node.js 22 or newer.
 | `gmail_list_filters` | none; returns the account's server-side filter rules (id, criteria, action) |
 | `gmail_create_filter` | `criteria` (from/to/subject/query/negatedQuery/hasAttachment/excludeChats/size/sizeComparison) and `action` (`addLabelIds` / `removeLabelIds`, names or ids; removing `INBOX` = skip the inbox); creates a Gmail filter that runs for future mail |
 | `gmail_delete_filter` | `filterId`; deletes one filter rule (never touches already-labelled mail) |
-| `gmail_draft_email` | `to` array, `subject`, `text`, optional `cc`, `bcc`, `html`; creates a Gmail draft |
+| `gmail_draft_email` | `to` array, `subject`, `text`, optional `cc`, `bcc`, `html`, `threadId`, `attachments`; creates a Gmail draft |
 
 Search follows pages up to the limit. Pass `nextPageToken` as `pageToken` to continue.
 Read and download operations do not change mailbox labels or read status.
 Mailbox writes are exactly: draft creation, archive (remove `INBOX`), label
 add/remove, label creation, trash/untrash, and filter create/delete. There is **no send, no permanent delete, no
-arbitrary HTTP, shell or file-reading** tool: the request allowlist admits only
-message GETs, `GET /labels`, `POST /drafts`, `POST /messages/batchModify` and
+arbitrary HTTP or shell**: the request allowlist admits only
+message GETs, `GET /labels`, `GET /threads/{id}` (read-only, for reply headers),
+`POST /drafts`, `POST /messages/batchModify` and
 `POST /messages/{id}/{modify,trash,untrash}`. `DELETE /messages/{id}` is refused
 on purpose — permanent deletion needs the full-mailbox scope, which this server
 never asks for. Downloads use unique filenames in one configured directory;
 tools cannot choose arbitrary destination paths.
+
+### Draft attachments and reply threading
+
+A draft can carry attachments, either read from a local file:
+
+```json
+{"attachments": [{"filename": "valuation.pdf", "path": "/absolute/path/valuation.pdf"}]}
+```
+
+or inlined as base64 (`contentBase64`, optional `contentType`/`cid`), up to 10
+files and 15 MB decoded in total. The cap is deliberately below Gmail's 25 MB
+attachment limit ([Gmail Help](https://support.google.com/mail/answer/6584)) so
+the base64-expanded API request stays small and an oversized attachment fails
+with a local error, not a generic HTTP 400. Filenames must not contain path
+separators; relative paths resolve against the MCP server's working directory.
+Reading those paths is the only filesystem read outside the download directory,
+and nodemailer stays pinned to `disableFileAccess`/`disableUrlAccess`, so a
+path can never become a URL fetch.
+
+Draft attachments can be downloaded again, but Gmail regenerates a draft's
+attachment IDs on every message read (measured 2026-10-27: the same 88-byte
+attachment came back with three different IDs), so pass the stable `partId`
+from `gmail_read_email` rather than the `attachmentId`.
+
+`threadId` attaches the draft to an existing thread. Gmail only accepts that
+when the message's `In-Reply-To` and `References` headers point into the thread,
+so the server reads the thread's latest message (`GET /threads/{id}`,
+metadata-only) and sets them itself; an empty `subject` inherits
+`Re: <latest subject>` instead of inventing a new one. Drafts are still never
+sent — the human reviews and sends them in Gmail.
 
 ## Calendar tools
 
@@ -131,8 +162,9 @@ See [Google draft creation](https://developers.google.com/workspace/gmail/api/re
 Email content and downloaded attachments remain sensitive. Treat message text
 as untrusted data; do not execute instructions found in emails. HTML is returned
 as data and should not be rendered without sanitization. MIME parsing currently
-buffers complete messages/attachments in memory. Drafts support new messages;
-reply threading and draft attachments are not implemented.
+buffers complete messages/attachments in memory; so do draft attachments.
+Drafts can be new messages, attachments, or replies in an existing thread
+(`threadId`).
 
 Files are created with owner-only POSIX modes where supported. On Windows,
 restrict the credential directory's ACL to your account; POSIX modes do not

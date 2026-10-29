@@ -65,6 +65,11 @@ export class Gmail {
     this.token = null; this.expires = 0; this.pendingToken = null;
     this.maxAttachmentBytes = MAX_ATTACHMENT_BYTES;
   }
+  /** Swap in re-authorized credentials (SIGHUP path) and drop the cached access token. */
+  reload(creds) {
+    this.creds = creds;
+    this.token = null; this.expires = 0; this.pendingToken = null;
+  }
   async accessToken() {
     if (this.token && Date.now() < this.expires) return this.token;
     if (!this.pendingToken) this.pendingToken = this.refresh().finally(() => { this.pendingToken = null; });

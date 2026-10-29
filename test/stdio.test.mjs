@@ -21,3 +21,29 @@ test('real stdio server initializes and advertises exactly twenty tools', { time
     const invalid = await request('tools/call', { name: 'gmail_read_email', arguments: { messageId: '../drafts' } }); assert.ok(invalid.error || invalid.result?.isError);
   } finally { lines.close(); child.kill(); }
 });
+
+test('SIGHUP reloads credentials in place instead of needing a restart', { timeout: 15000 }, async () => {
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], {
+    env: { ...process.env, GMAIL_CLIENT_ID: 'synthetic-client', GMAIL_CLIENT_SECRET: 'synthetic-secret', GMAIL_REFRESH_TOKEN: 'synthetic-refresh' }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const lines = createInterface({ input: child.stdout }); const pending = new Map(); let next = 1; let stderr = '';
+  lines.on('line', line => { const msg = JSON.parse(line); if (pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); } });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const request = (method, params) => new Promise(resolve => { const id = next++; pending.set(id, resolve); child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); });
+  const waitFor = async (predicate, ms = 5000) => {
+    for (const deadline = Date.now() + ms; Date.now() < deadline;) {
+      if (predicate()) return true;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    return predicate();
+  };
+  try {
+    await request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test-client', version: '1' } });
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+    assert.equal(child.kill('SIGHUP'), true);
+    assert.ok(await waitFor(() => stderr.includes('Credentials reloaded')), 'server should log the reload: ' + stderr);
+    assert.equal(child.exitCode, null, 'SIGHUP must not terminate the server');
+    const list = await request('tools/list', {});
+    assert.equal(list.result.tools.length, 20);
+  } finally { lines.close(); child.kill(); }
+});

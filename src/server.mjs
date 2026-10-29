@@ -10,6 +10,21 @@ try {
   const creds = await credentials(cfg);
   const gmail = new Gmail(creds, cfg.downloadDir);
   const calendar = new Calendar(creds, { timeZone: process.env.CALENDAR_TIME_ZONE || DEFAULT_TIME_ZONE });
+  // `npm run auth` rewrites the token file, but this process read the old refresh
+  // token at startup and keeps it in memory; SIGHUP re-reads it in place so a
+  // re-authorization does not need the child to be killed and respawned.
+  // Errors are logged to stderr only: the stdio channel belongs to MCP.
+  const reloadCredentials = async () => {
+    try {
+      const fresh = await credentials(cfg);
+      gmail.reload(fresh);
+      calendar.reload(fresh);
+      console.error('Credentials reloaded from ' + cfg.tokenFile);
+    } catch (error) {
+      console.error('Credential reload failed: ' + String((error && error.message) || error).slice(0, 200));
+    }
+  };
+  process.on('SIGHUP', reloadCredentials);
   await serveStdio(() => {
     const server = new McpServer({ name: 'gmail-mcp', version: '1.2.0' });
     for (const tool of tools(gmail, calendar)) server.registerTool(tool.name, {

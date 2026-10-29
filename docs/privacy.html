@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy Policy | DSH Mail Connector</title><link rel="stylesheet" href="./style.css"></head>
+<body><main><nav><a href="./">DSH Mail Connector</a><strong>Privacy policy</strong></nav><article>
+<h1>Privacy Policy</h1><p><strong>Effective date:</strong> 29 October 2026 — applies to DSH Mail Connector 1.3.0 and later.</p>
+<p>DSH Mail Connector ("the server") is a locally operated Model Context Protocol server. This policy describes the behaviour of the published server implementation.</p>
+<h2>Who operates it</h2><p>The server is not a hosted service and has no operator-side backend. Whoever installs and runs it controls it on their own computer; this page describes the software, not a cloud account.</p>
+<h2>Google data accessed</h2><p>After the user grants consent, the server can access their Gmail and Google Calendar data through Google APIs, limited to these four scopes:</p><ul>
+<li><code>gmail.modify</code> — read messages and labels; add or remove labels; archive, trash and restore messages; create drafts.</li>
+<li><code>gmail.settings.basic</code> — read, create and delete the account's Gmail filter rules.</li>
+<li><code>calendar.events</code> — create, update and delete calendar events.</li>
+<li><code>calendar.readonly</code> — list calendars, read events and query free/busy information.</li>
+</ul>
+<p>The implemented tools cover search, read, download, draft creation, label and filter management, trash and restore, and calendar event management. The server has no send-mail tool and no permanent-delete route.</p>
+<h2>How the data is used</h2><p>Data is used only to carry out actions the user starts through their MCP client: returning search results and message content, saving a message or attachment to the configured download folder, changing labels or trash state, creating a draft, or reading and writing calendar events. Nothing is used for advertising, profiling or analytics.</p>
+<h2>Where data is stored</h2><p>OAuth credentials (a refresh token and the OAuth client details) are stored in a local credential file; messages and attachments are written only to a local download folder the user chooses. The server keeps no cloud database, no telemetry and no server-side logs of message content.</p>
+<h2>Sharing and AI services</h2><p>The server itself sends data only to Google APIs (Gmail, Calendar and the OAuth token endpoint). When a mail or calendar item is returned through an MCP client or AI assistant, that client — not this server — decides what happens to it; depending on its configuration it may send the content to a third-party AI model provider. Users should review their assistant's data-processing and retention terms before connecting it.</p>
+<h2>Retention and deletion</h2><p>Local credentials and downloaded files remain on the user's computer until the user or administrator deletes them. Drafts, labels, filters, trash state and calendar events are stored by Google under the user's own Google account settings. Data the server never stores cannot be retained by it.</p>
+<h2>Revoking access</h2><p>Access can be revoked at any time at <a href="https://myaccount.google.com/connections">Google Account connections</a>; this invalidates the refresh token. To remove local copies, delete the credential file and the download folder.</p>
+<h2>Google API Services User Data Policy</h2><p>The server's use of Google user data follows the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements: data is used only to provide the features described on this page, is not sold, is not used for advertising, and is not transferred to third parties except as needed to provide those features or as required by law.</p>
+<h2>Security</h2><p>Credentials are written with owner-only permissions where the operating system supports them; OAuth uses PKCE and state verification; tokens are never printed or sent anywhere except Google's token endpoint.</p>
+<h2>Contact</h2><p>Questions, data-deletion requests or security reports: <a href="https://github.com/chenwj1957/gmail-mcp/issues">open an issue</a> on the project repository.</p>
+<p><small>Last updated: 29 October 2026.</small></p>
+</article></main></body></html>

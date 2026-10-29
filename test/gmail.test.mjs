@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { delimiter, join, dirname } from 'node:path';
 import { simpleParser } from 'mailparser';
 import { Gmail, allowedRoute, validId } from '../src/gmail.mjs';
 import { tools } from '../src/tools.mjs';
 import { validCallback } from '../src/oauth.mjs';
+import { attachmentRoots, config } from '../src/config.mjs';
 
 const creds = { client_id: 'test-client', client_secret: 'test-secret', refresh_token: 'test-refresh' };
 function mock(handler) {
@@ -226,4 +227,39 @@ test('search summaries carry subject/from/date/labels without fetching bodies', 
   assert.ok(!calls.some(c => new URL(c.url).searchParams.get('format') === 'full'));
   const headers = new URL(calls.find(c => new URL(c.url).searchParams.get('format') === 'metadata').url).searchParams.getAll('metadataHeaders');
   assert.deepEqual(headers, ['From', 'Subject', 'Date']);
+});
+
+test('draft attachment paths are confined to the allowed roots', async () => {
+  const allowed = await mkdtemp(join(tmpdir(), 'gmail-mcp-root-'));
+  const outside = await mkdtemp(join(tmpdir(), 'gmail-mcp-outside-'));
+  try {
+    const inside = join(allowed, 'report.txt'); await writeFile(inside, 'in');
+    const beyond = join(outside, 'id_rsa'); await writeFile(beyond, 'secret');
+    const escaped = join(allowed, 'looks-inside'); await symlink(beyond, escaped);
+    let payload = null;
+    const gmail = new Gmail(creds, tmpdir(), async (url, options) => {
+      if (String(url).includes('oauth2.googleapis.com')) return Response.json({ access_token: 'test-access', expires_in: 3600 });
+      payload = JSON.parse(options.body); return Response.json({ id: 'd1', message: { id: 'm1' } });
+    }, [allowed]);
+    await gmail.draft({ to: ['x@example.com'], subject: 'Files', text: 'body', attachments: [{ filename: 'report.txt', path: inside }] });
+    assert.ok(payload.message.raw, 'a file inside the allowed root is attached');
+    await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'id_rsa', path: beyond }] }), /outside the allowed attachment roots/);
+    // A symlink created inside an allowed folder must not widen the root.
+    await assert.rejects(gmail.draft({ to: ['x@example.com'], subject: 's', text: '', attachments: [{ filename: 'x.txt', path: escaped }] }), /outside the allowed attachment roots/);
+  } finally { await rm(allowed, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
+
+test('GMAIL_ATTACHMENT_ROOTS accepts defaults, an explicit list and the * escape hatch', () => {
+  assert.ok(config({}).attachmentRoots.includes(tmpdir()), 'defaults include the temporary directory');
+  const roots = [join(tmpdir(), 'a'), join(tmpdir(), 'b')];
+  assert.deepEqual(attachmentRoots({ GMAIL_ATTACHMENT_ROOTS: roots.join(delimiter) }), roots);
+  assert.equal(attachmentRoots({ GMAIL_ATTACHMENT_ROOTS: ' * ' }), null);
+});
+
+test('destructive tools are annotated so a host can ask before running them', () => {
+  const byName = Object.fromEntries(tools({}).map(tool => [tool.name, tool]));
+  for (const name of ['gmail_trash_email', 'gmail_create_filter', 'gmail_delete_filter', 'calendar_delete_event']) {
+    assert.equal(byName[name].destructive, true, name);
+  }
+  for (const name of ['gmail_archive_email', 'gmail_label_email', 'gmail_draft_email']) assert.ok(!byName[name].destructive, name);
 });

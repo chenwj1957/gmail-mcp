@@ -50,6 +50,15 @@ Reading those paths is the only filesystem read outside the download directory,
 and nodemailer stays pinned to `disableFileAccess`/`disableUrlAccess`, so a
 path can never become a URL fetch.
 
+Attachment paths are also confined to the places a person normally keeps a file
+they want to email: `~/Downloads`, `~/Documents`, `~/Desktop`, `~/Pictures` and
+the system temporary directories. The MCP caller can name any path, and an MCP
+host driven by email content is untrusted, so credential stores, SSH keys and
+other applications' data are refused by default. Set `GMAIL_ATTACHMENT_ROOTS`
+to a path-delimiter-separated list to change the folders, or to `*` to disable
+the check. Symlinks are resolved first, so a link inside an allowed folder
+cannot point outside it.
+
 Draft attachments can be downloaded again, but Gmail regenerates a draft's
 attachment IDs on every message read (measured 2026-10-27: the same 88-byte
 attachment came back with three different IDs), so pass the stable `partId`
@@ -124,11 +133,12 @@ and separate from MCP startup. It never prints token or client secret values.
 | `GMAIL_CLIENT_FILE` | `~/.gmail-mcp/client-credentials.json` |
 | `GMAIL_TOKEN_FILE` | `~/.gmail-mcp/credentials.json` |
 | `GMAIL_DOWNLOAD_DIR` | `~/.gmail-mcp/downloads` |
+| `GMAIL_ATTACHMENT_ROOTS` | `~/Downloads`, `~/Documents`, `~/Desktop`, `~/Pictures`, system temp dirs |
 
 Alternatively provide **all three** `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`,
 and `GMAIL_REFRESH_TOKEN` through your host's secure environment settings.
 The server does not read legacy credential stores. Existing refresh tokens may
-be reused only if they grant the required read and compose permissions.
+be reused only if they grant the required scopes (Gmail modify + settings, and the calendar scopes).
 
 Example MCP host configuration (replace the path):
 
@@ -165,6 +175,10 @@ as data and should not be rendered without sanitization. MIME parsing currently
 buffers complete messages/attachments in memory; so do draft attachments.
 Drafts can be new messages, attachments, or replies in an existing thread
 (`threadId`).
+
+Tools whose effect can lose data — `gmail_trash_email`, `gmail_create_filter`,
+`gmail_delete_filter` and `calendar_delete_event` — carry the MCP `destructiveHint`
+annotation so a host can ask for confirmation first.
 
 Files are created with owner-only POSIX modes where supported. On Windows,
 restrict the credential directory's ACL to your account; POSIX modes do not

@@ -35,7 +35,7 @@ export function tools(gmail, calendar) {
       schema: z.object({ messageIds: ids, addLabelIds: labelNames.optional(), removeLabelIds: labelNames.optional() }).refine(x => (x.addLabelIds?.length ?? 0) + (x.removeLabelIds?.length ?? 0) > 0, 'Provide addLabelIds or removeLabelIds'),
       run: args => gmail.modify(args), readOnly: false },
     { name: 'gmail_trash_email', description: 'Move messages to Trash (recoverable, kept ~30 days) or restore them with restore=true. Permanent deletion is not offered: it needs a scope this server does not request.',
-      schema: z.object({ messageIds: ids, restore: z.boolean().default(false) }), run: args => gmail.trash(args), readOnly: false },
+      schema: z.object({ messageIds: ids, restore: z.boolean().default(false) }), run: args => gmail.trash(args), readOnly: false, destructive: true },
     { name: 'gmail_create_label', description: 'Create a Gmail user label (e.g. Property, Jobs). Gmail refuses a duplicate name; list labels first and reuse the id instead.',
       schema: z.object({
         name: z.string().min(1).max(225).regex(/^[^\r\n\x00]+$/),
@@ -61,9 +61,9 @@ export function tools(gmail, calendar) {
           addLabelIds: labelNames.optional(),
           removeLabelIds: labelNames.optional(),
         }),
-      }), run: args => gmail.createFilter(args), readOnly: false },
+      }), run: args => gmail.createFilter(args), readOnly: false, destructive: true },
     { name: 'gmail_delete_filter', description: 'Delete a Gmail filter rule by its id (see gmail_list_filters). Deleting a rule never touches mail it already labelled.',
-      schema: z.object({ filterId: id }), run: args => gmail.deleteFilter(args), readOnly: false },
+      schema: z.object({ filterId: id }), run: args => gmail.deleteFilter(args), readOnly: false, destructive: true },
     { name: 'gmail_draft_email', description: 'Create a new Gmail draft with plain text and optional HTML. Never sends email. Attach local files with attachments:[{filename, path}] or inline bytes with contentBase64 (optional contentType/cid), up to 15 MB decoded in total. Set threadId to put the draft in an existing thread: the server reads that thread\'s latest Message-ID and sets In-Reply-To/References; an empty subject inherits "Re: <thread subject>". Relative paths resolve against the server working directory, so prefer absolute paths.',
       schema: z.object({
         to: z.array(email).min(1).max(100),

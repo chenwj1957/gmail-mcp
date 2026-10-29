@@ -1,7 +1,8 @@
 import { simpleParser } from 'mailparser';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { mkdir, realpath, readFile, stat, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const API = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -38,6 +39,16 @@ export function attachmentBytes(value, filename) {
 // for the base64 expansion of the raw message the API request carries.
 export const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
+/** Folders a draft attachment may be read from by default: the places a person
+ *  keeps a file they want to email. The caller can name any path, and the caller
+ *  is steered by untrusted email content, so "everything this process can read"
+ *  (SSH keys, credential stores, other apps' data) is deliberately not allowed.
+ *  GMAIL_ATTACHMENT_ROOTS replaces this list; `*` disables the check. */
+export function defaultAttachmentRoots() {
+  return [join(homedir(), 'Downloads'), join(homedir(), 'Documents'),
+    join(homedir(), 'Desktop'), join(homedir(), 'Pictures'), tmpdir(), '/tmp'];
+}
+
 // No arbitrary HTTP: the allowlist is read routes plus the four mailbox writes
 // below. Deliberately absent: POST /messages/send, POST /drafts/send and
 // DELETE /messages/{id} (permanent deletion needs the full-mailbox scope; this
@@ -60,8 +71,9 @@ export function allowedRoute(method, path) {
 }
 
 export class Gmail {
-  constructor(creds, downloadDir, fetchImpl = fetch) {
+  constructor(creds, downloadDir, fetchImpl = fetch, attachmentRoots = defaultAttachmentRoots()) {
     this.creds = creds; this.downloadDir = downloadDir; this.fetch = fetchImpl;
+    this.attachmentRoots = attachmentRoots; this.rootCache = null;
     this.token = null; this.expires = 0; this.pendingToken = null;
     this.maxAttachmentBytes = MAX_ATTACHMENT_BYTES;
   }
@@ -312,6 +324,25 @@ export class Gmail {
     if (messageId === '') throw new Error('Invalid thread: the latest message has no Message-ID header.');
     return { messageId, references: String(headers.references ?? '').trim(), subject: String(headers.subject ?? '').trim() };
   }
+  /** Realpath of every allowed root, computed once. A root that does not exist
+   *  is skipped, so it simply allows nothing. */
+  async attachmentRootList() {
+    if (!this.rootCache) this.rootCache = Promise.all((this.attachmentRoots || []).map(async root => {
+      try { return await realpath(root); } catch { return null; }
+    }));
+    return (await this.rootCache).filter(Boolean);
+  }
+  /** Resolve symlinks before checking, so a link inside an allowed folder cannot
+   *  smuggle out a path that really lives elsewhere. Returns the real path. */
+  async attachmentPath(path) {
+    if (this.attachmentRoots === null) return path;
+    const real = await realpath(path);
+    const roots = await this.attachmentRootList();
+    if (!roots.some(root => real === root || real.startsWith(root + sep))) {
+      throw new Error(`Attachment path is outside the allowed attachment roots: ${path}`);
+    }
+    return real;
+  }
   /** Normalise caller attachments to nodemailer parts. Paths are read here (the
    *  only filesystem read besides the download directory) so nodemailer stays
    *  pinned to disableFileAccess/disableUrlAccess and can never fetch a URL. */
@@ -326,7 +357,7 @@ export class Gmail {
         try { info = await stat(path); } catch { throw new Error(`Attachment file not found: ${path}`); }
         if (!info.isFile()) throw new Error(`Attachment path is not a regular file: ${path}`);
         if (info.size > this.maxAttachmentBytes) throw new Error(`Attachment ${filename} exceeds the ${Math.floor(this.maxAttachmentBytes / 1048576)} MB limit.`);
-        content = await readFile(path);
+        content = await readFile(await this.attachmentPath(path));
       } else {
         content = attachmentBytes(item.contentBase64, filename);
       }

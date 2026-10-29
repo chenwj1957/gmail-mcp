@@ -1,6 +1,16 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve, join } from 'node:path';
+import { delimiter, resolve, join } from 'node:path';
+import { defaultAttachmentRoots } from './gmail.mjs';
+
+/** GMAIL_ATTACHMENT_ROOTS: unset keeps the safe default folders; `*` disables
+ *  the attachment-path check; a path-delimiter separated list replaces it. */
+export function attachmentRoots(env = process.env) {
+  const raw = env.GMAIL_ATTACHMENT_ROOTS;
+  if (raw === undefined) return defaultAttachmentRoots();
+  if (raw.trim() === '*') return null;
+  return raw.split(delimiter).map(part => part.trim()).filter(Boolean).map(part => resolve(part));
+}
 
 export function config(env = process.env) {
   const home = join(homedir(), '.gmail-mcp');
@@ -9,6 +19,7 @@ export function config(env = process.env) {
     tokenFile: resolve(env.GMAIL_TOKEN_FILE || join(home, 'credentials.json')),
     downloadDir: resolve(env.GMAIL_DOWNLOAD_DIR || join(home, 'downloads')),
     pendingFile: resolve(env.GMAIL_PENDING_FILE || join(home, 'pending-auth.json')),
+    attachmentRoots: attachmentRoots(env),
   };
 }
 

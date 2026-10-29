@@ -11,3 +11,5 @@ downloads/
 *-digest.json
 *.log
 coverage/
+.DS_Store
+pending-auth.json

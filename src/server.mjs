@@ -8,7 +8,7 @@ import { tools } from './tools.mjs';
 const cfg = config();
 try {
   const creds = await credentials(cfg);
-  const gmail = new Gmail(creds, cfg.downloadDir);
+  const gmail = new Gmail(creds, cfg.downloadDir, fetch, cfg.attachmentRoots);
   const calendar = new Calendar(creds, { timeZone: process.env.CALENDAR_TIME_ZONE || DEFAULT_TIME_ZONE });
   // `npm run auth` rewrites the token file, but this process read the old refresh
   // token at startup and keeps it in memory; SIGHUP re-reads it in place so a
@@ -26,7 +26,7 @@ try {
   };
   process.on('SIGHUP', reloadCredentials);
   await serveStdio(() => {
-    const server = new McpServer({ name: 'gmail-mcp', version: '1.2.0' });
+    const server = new McpServer({ name: 'gmail-mcp', version: '1.3.0' });
     for (const tool of tools(gmail, calendar)) server.registerTool(tool.name, {
       description: tool.description, inputSchema: tool.schema,
       annotations: { readOnlyHint: tool.readOnly, destructiveHint: Boolean(tool.destructive), idempotentHint: tool.readOnly, openWorldHint: true },
